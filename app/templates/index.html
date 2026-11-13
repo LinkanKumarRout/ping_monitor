@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>{{ app_name }}</h1>
+      <div class="mode-line">continuous ICMP · 1s interval · log every fail</div>
+    </div>
+    <div class="header-actions">
+      <div class="meta" id="run-meta">
+        <div><strong>Status:</strong> <span id="run-state">…</span></div>
+        <div><strong>Targets:</strong> <span id="target-count">0</span></div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="card card-full">
+      <h2>Targets</h2>
+      <form id="add-form" class="add-row">
+        <input
+          id="ip-input"
+          type="text"
+          placeholder="IP or hostname (e.g. 10.0.0.5)"
+          autocomplete="off"
+          spellcheck="false"
+          required
+        />
+        <button type="submit" id="btn-add" class="btn primary">Add IP</button>
+      </form>
+      <p id="edit-hint" class="muted" hidden>Stop monitoring to add or remove IPs. Changes write to data/ips.json immediately.</p>
+      <p id="form-error" class="error" hidden></p>
+      <div class="controls">
+        <button type="button" id="btn-start" class="btn ok">Start</button>
+        <button type="button" id="btn-stop" class="btn bad">Stop</button>
+      </div>
+      <div id="target-list" class="target-list">
+        <p class="muted">No targets yet. Add an IP above.</p>
+      </div>
+    </section>
+
+    <section class="card card-full">
+      <div class="log-header">
+        <h2>Error log</h2>
+        <div class="log-header-actions">
+          <span id="log-meta" class="muted"></span>
+          <button type="button" id="btn-clear-logs" class="btn bad">Clear logs</button>
+        </div>
+      </div>
+      <pre id="log-view">waiting for failures…</pre>
+    </section>
+  </main>
+
+  <div id="clear-modal" class="modal" hidden aria-hidden="true">
+    <div class="modal-backdrop" data-close-modal></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="clear-modal-title">
+      <h3 id="clear-modal-title">Clear error log?</h3>
+      <p>This will permanently delete all entries from <code>ping_errors.log</code>. This cannot be undone.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" id="btn-clear-cancel" data-close-modal>Cancel</button>
+        <button type="button" class="btn bad" id="btn-clear-confirm">Clear logs</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const ipInput = document.getElementById("ip-input");
+    const formError = document.getElementById("form-error");
+    const targetList = document.getElementById("target-list");
+    const runState = document.getElementById("run-state");
+    const targetCount = document.getElementById("target-count");
+    const logView = document.getElementById("log-view");
+    const logMeta = document.getElementById("log-meta");
+    const btnStart = document.getElementById("btn-start");
+    const btnStop = document.getElementById("btn-stop");
+    const btnAdd = document.getElementById("btn-add");
+    const editHint = document.getElementById("edit-hint");
+    let isRunning = false;
+
+    function showError(msg) {
+      if (!msg) {
+        formError.hidden = true;
+        formError.textContent = "";
+        return;
+      }
+      formError.hidden = false;
+      formError.textContent = msg;
+    }
+
+    function badgeClass(state) {
+      if (state === "ok") return "badge ok";
+      if (state === "fail") return "badge fail";
+      return "badge idle";
+    }
+
+    function renderStatus(data) {
+      isRunning = !!data.running;
+      const targets = data.targets || [];
+      runState.textContent = isRunning ? "RUNNING" : "STOPPED";
+      runState.className = isRunning ? "run-ok" : "run-stopped";
+      targetCount.textContent = String(targets.length);
+      btnStart.disabled = isRunning;
+      btnStop.disabled = !isRunning;
+      ipInput.disabled = isRunning;
+      btnAdd.disabled = isRunning;
+      editHint.hidden = !isRunning;
+
+      if (!targets.length) {
+        targetList.innerHTML = '<p class="muted">No targets yet. Add an IP above.</p>';
+        return;
+      }
+
+      targetList.innerHTML = targets.map((t) => {
+        const last = t.state === "fail"
+          ? (t.last_fail_at || "—")
+          : (t.last_ok_at || t.last_fail_at || "—");
+        const msg = t.last_message ? escapeHtml(t.last_message) : "";
+        const removeBtn = isRunning
+          ? `<button type="button" class="btn ghost" disabled title="Stop first">Remove</button>`
+          : `<button type="button" class="btn ghost" data-remove="${escapeHtml(t.ip)}">Remove</button>`;
+        return `
+          <div class="target-row">
+            <div class="target-main">
+              <span class="${badgeClass(t.state)}">${escapeHtml(t.state).toUpperCase()}</span>
+              <strong class="target-ip">${escapeHtml(t.ip)}</strong>
+              <span class="muted">fails: ${t.fail_count || 0}</span>
+            </div>
+            <div class="target-meta muted">
+              <span>last: ${escapeHtml(last)}</span>
+              ${msg ? `<span title="${msg}">${msg}</span>` : ""}
+            </div>
+            ${removeBtn}
+          </div>
+        `;
+      }).join("");
+
+      targetList.querySelectorAll("[data-remove]").forEach((btn) => {
+        btn.addEventListener("click", () => removeIp(btn.getAttribute("data-remove")));
+      });
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    async function api(path, options) {
+      const res = await fetch(path, options);
+      let body = null;
+      try { body = await res.json(); } catch (_) { body = null; }
+      if (!res.ok) {
+        const detail = body && body.detail ? body.detail : res.statusText;
+        throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+      }
+      return body;
+    }
+
+    async function refreshStatus() {
+      try {
+        const data = await api("/api/status");
+        renderStatus(data);
+      } catch (err) {
+        runState.textContent = "ERROR";
+        runState.className = "run-stopped";
+      }
+    }
+
+    async function refreshLogs() {
+      try {
+        const data = await api("/api/logs?limit=300");
+        const lines = data.lines || [];
+        logMeta.textContent = lines.length ? `${lines.length} lines` : "empty";
+        logView.textContent = lines.length ? lines.join("\n") : "no failures logged yet";
+        logView.scrollTop = logView.scrollHeight;
+      } catch (_) {
+        logMeta.textContent = "log read failed";
+      }
+    }
+
+    document.getElementById("add-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showError("");
+      if (isRunning) {
+        showError("Stop monitoring before adding IPs");
+        return;
+      }
+      const ip = ipInput.value.trim();
+      if (!ip) return;
+      try {
+        const data = await api("/api/ips", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ip }),
+        });
+        ipInput.value = "";
+        renderStatus(data.status);
+      } catch (err) {
+        showError(err.message || String(err));
+      }
+    });
+
+    async function removeIp(ip) {
+      showError("");
+      if (isRunning) {
+        showError("Stop monitoring before removing IPs");
+        return;
+      }
+      try {
+        const data = await api("/api/ips/" + encodeURIComponent(ip), { method: "DELETE" });
+        renderStatus(data.status);
+      } catch (err) {
+        showError(err.message || String(err));
+      }
+    }
+
+    btnStart.addEventListener("click", async () => {
+      showError("");
+      try {
+        const data = await api("/api/start", { method: "POST" });
+        renderStatus(data);
+      } catch (err) {
+        showError(err.message || String(err));
+      }
+    });
+
+    btnStop.addEventListener("click", async () => {
+      showError("");
+      try {
+        const data = await api("/api/stop", { method: "POST" });
+        renderStatus(data);
+      } catch (err) {
+        showError(err.message || String(err));
+      }
+    });
+
+    const clearModal = document.getElementById("clear-modal");
+    const btnClearConfirm = document.getElementById("btn-clear-confirm");
+
+    function openClearModal() {
+      clearModal.hidden = false;
+      clearModal.setAttribute("aria-hidden", "false");
+      btnClearConfirm.focus();
+    }
+
+    function closeClearModal() {
+      clearModal.hidden = true;
+      clearModal.setAttribute("aria-hidden", "true");
+    }
+
+    document.getElementById("btn-clear-logs").addEventListener("click", () => {
+      showError("");
+      openClearModal();
+    });
+
+    clearModal.querySelectorAll("[data-close-modal]").forEach((el) => {
+      el.addEventListener("click", () => closeClearModal());
+    });
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !clearModal.hidden) closeClearModal();
+    });
+
+    btnClearConfirm.addEventListener("click", async () => {
+      showError("");
+      btnClearConfirm.disabled = true;
+      try {
+        await api("/api/logs/clear", { method: "POST" });
+        logMeta.textContent = "empty";
+        logView.textContent = "no failures logged yet";
+        closeClearModal();
+      } catch (err) {
+        showError(err.message || String(err));
+        closeClearModal();
+      } finally {
+        btnClearConfirm.disabled = false;
+      }
+    });
+
+    refreshStatus();
+    refreshLogs();
+    setInterval(refreshStatus, 1000);
+    setInterval(refreshLogs, 2000);
+  </script>
+</body>
+</html>
