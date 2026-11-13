@@ -23,6 +23,8 @@ Open http://127.0.0.1:8090
 
 ## Notes
 
-- Uses system `ping` (`ping -c 1 -W 1 <host>`).
+- Uses system `ping`:
+  - Linux/macOS: `ping -c 1 -W 1 <host>`
+  - Windows: `ping -n 1 -w 1000 <host>`
 - Monitoring always starts **Stopped** after a process restart; the IP list is kept.
-- Adding an IP while running starts a new ping loop for that IP immediately.
+- Add/remove IPs only while Stopped.

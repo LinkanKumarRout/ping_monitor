@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 import subprocess
 import threading
 import time
@@ -14,6 +15,7 @@ LOGS_DIR = ROOT / "logs"
 ERROR_LOG = LOGS_DIR / "ping_errors.log"
 PING_INTERVAL_SEC = 1.0
 PING_TIMEOUT_SEC = 1
+IS_WINDOWS = platform.system().lower() == "windows"
 
 
 @dataclass
@@ -151,10 +153,18 @@ def _append_error(ip: str, message: str, timestamp: str) -> None:
         fh.write(line)
 
 
+def _ping_cmd(ip: str) -> list[str]:
+    # Linux/macOS: -c count, -W timeout seconds
+    # Windows: -n count, -w timeout milliseconds (-c is "compartment" and needs admin)
+    if IS_WINDOWS:
+        return ["ping", "-n", "1", "-w", str(PING_TIMEOUT_SEC * 1000), ip]
+    return ["ping", "-c", "1", "-W", str(PING_TIMEOUT_SEC), ip]
+
+
 def _ping_once(ip: str) -> tuple[bool, str]:
     try:
         result = subprocess.run(
-            ["ping", "-c", "1", "-W", str(PING_TIMEOUT_SEC), ip],
+            _ping_cmd(ip),
             capture_output=True,
             text=True,
             timeout=PING_TIMEOUT_SEC + 2,
